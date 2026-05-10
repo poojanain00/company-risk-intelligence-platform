@@ -11,7 +11,7 @@ The architecture follows a Medallion design pattern (Bronze → Silver → Gold)
 ## 2. High-Level Architecture
 
 ### Data Flow
-
+```
 Companies House API  
 Yahoo Finance API (Stock + News)  
         ↓  
@@ -26,7 +26,7 @@ Yahoo Finance API (Stock + News)
    Gold Layer (Business Intelligence & Risk Scoring)  
         ↓  
    Analytics / Reporting Layer  
-
+```
 ---
 
 ## 3. Data Layers
