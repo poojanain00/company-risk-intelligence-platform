@@ -1,13 +1,45 @@
-# Data Contract – Company Risk Intelligence Platform
-
-## 1. Purpose
-
-This data contract defines the structure, rules, and expectations for datasets used in the Company Risk Intelligence Platform.
-
-It ensures consistency across ingestion, transformation, and analytics layers.
+# 📜 DATA CONTRACT  
+## Company Risk Intelligence Platform
 
 ---
 
+# 📑 TABLE OF CONTENTS
+
+1. Introduction  
+2. Data Product Overview  
+3. Data Ownership  
+4. Source System Details  
+5. Source Table Details  
+6. Business Definitions  
+7. Target (Gold Layer Design)  
+8. Data Access & Security  
+9. Confidentiality Classification  
+10. Data Refresh & Latency  
+11. Data Quality Rules  
+12. Data Dictionary  
+13. Lineage  
+14. Orchestration Details  
+15. Consumption Layer  
+
+---
+
+# 1. INTRODUCTION
+
+The Company Risk Intelligence Platform data product provides a unified, analytics-ready dataset that integrates company registry data, financial market data, and financial news signals.
+
+The goal is to enable a holistic view of company performance, governance, and risk by combining multiple external data sources into a structured lakehouse architecture using Databricks.
+
+---
+
+# 2. DATA PRODUCT OVERVIEW
+
+```yaml
+data_product: company_risk_intelligence_platform
+domain: financial_risk_analytics
+description: >
+  This data product integrates company registry data, stock market data,
+  and financial news into a unified analytical model for company risk
+  scoring, performance monitoring, and business intelligence.
 ## 2. Entities
 
 ### 2.1 Company Entity
