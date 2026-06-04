@@ -1,662 +1,349 @@
-# Company Risk Intelligence Platform – Data Contract
-
-This document defines the data contract for the Company Risk Intelligence Platform. It specifies ownership, source systems, schemas, quality expectations, security requirements, lineage, orchestration, and consumption rules for all datasets produced within the platform.
-
----
-
-# Table of Contents
-
-* [Data Contract](#data-contract)
-* [Data Ownership](#data-ownership)
-* [Source System Details](#source-system-details)
-* [Source Table Details](#source-table-details)
-
-  * [company_registry](#company_registry)
-  * [stock_market_data](#stock_market_data)
-  * [financial_news](#financial_news)
-* [Business Definitions](#business-definitions)
-* [Target (Gold Layer Design)](#target-gold-layer-design)
-* [Data Access & Security](#data-access--security)
-* [Confidentiality Classification](#confidentiality-classification)
-* [Data Refresh & Latency](#data-refresh--latency)
-* [Data Quality Rules](#data-quality-rules)
-* [Data Dictionary](#data-dictionary)
-
-  * [dim_company](#dim_company)
-  * [dim_date](#dim_date)
-  * [dim_news_event](#dim_news_event)
-  * [fact_stock_performance](#fact_stock_performance)
-  * [fact_company_risk](#fact_company_risk)
-* [Lineage](#lineage)
-* [Orchestration Details](#orchestration-details)
-* [Consumption Layer](#consumption-layer)
-
----
-
 # Data Contract
+## Company Risk Intelligence Platform
+
+This document defines the data contract for the Company Risk Intelligence Platform: ownership, source systems, schemas, grain, keys, quality rules, lineage, and consumption. It reflects the **implemented** pipeline.
+
+---
+
+## Table of Contents
+
+- [Data Product](#data-product)
+- [Data Ownership](#data-ownership)
+- [Source Systems](#source-systems)
+- [Layered Model Overview](#layered-model-overview)
+- [Bronze Layer](#bronze-layer)
+- [Silver Layer](#silver-layer)
+- [Gold Layer (Star Schema)](#gold-layer-star-schema)
+- [Entity Resolution](#entity-resolution)
+- [Business Definitions](#business-definitions)
+- [Data Quality Rules](#data-quality-rules)
+- [Data Classification & Security](#data-classification--security)
+- [Data Refresh & Latency](#data-refresh--latency)
+- [Lineage](#lineage)
+- [Orchestration](#orchestration)
+- [Consumption Layer](#consumption-layer)
+
+---
+
+## Data Product
 
 ```yaml
 data_product: company_risk_intelligence_platform
-
 domain: financial_risk_analytics
-
+catalog: company_risk_intelligence_platform
+schemas: [bronze, silver, gold]
+universe: 20 UK-listed companies
 description: >
-  This data product provides integrated company intelligence datasets
-  by combining company registry information, stock market performance,
-  and financial news signals to support company risk assessment,
-  governance monitoring, and business intelligence analytics.
+  Integrated company intelligence combining registry, market, and news data
+  to produce an explainable per-company risk score.
 ```
 
 ---
 
-# Data Ownership
+## Data Ownership
 
 ```yaml
-data_owner:
-  business_owner: Financial Risk Analytics Team
-  technical_owner: Data Engineering Team
-  steward: Data Governance Team
+business_owner: Financial Risk Analytics Team
+technical_owner: Data Engineering Team
+steward: Data Governance Team
 ```
 
-### Responsibilities
-
-| Role            | Responsibility                                                        |
-| --------------- | --------------------------------------------------------------------- |
-| Business Owner  | Defines business KPIs, risk metrics, and reporting requirements       |
-| Technical Owner | Builds, maintains, and monitors data pipelines                        |
-| Data Steward    | Ensures governance, data quality, compliance, and metadata management |
+| Role | Responsibility |
+| --- | --- |
+| Business Owner | Defines risk metrics and reporting requirements |
+| Technical Owner | Builds and maintains pipelines |
+| Data Steward | Governance, quality, and metadata |
 
 ---
 
-# Source System Details
+## Source Systems
 
-```yaml
-source_systems:
-
-  - name: Companies House API
-    type: REST API
-    ingestion_method: Batch
-
-  - name: Yahoo Finance API
-    type: REST API
-    ingestion_method: Batch
-
-  - name: Yahoo Finance News
-    type: Financial News Feed
-    ingestion_method: Batch
-```
-
-### Source Overview
-
-| Source             | Purpose                                         |
-| ------------------ | ----------------------------------------------- |
-| Companies House    | Company registration and governance information |
-| Yahoo Finance      | Stock prices, volume, and market metrics        |
-| Yahoo Finance News | Company-related news and events                 |
+| Source | Type | Ingestion | Purpose |
+| --- | --- | --- | --- |
+| Companies House API | REST API | Batch | Registry & governance |
+| Yahoo Finance API (yfinance) | REST API | Batch | Stock, fundamentals, company info |
+| Yahoo Finance News | News feed | Batch | News & events |
 
 ---
 
-# Source Table Details
+## Layered Model Overview
 
-## company_registry
-
-```yaml
-company_registry:
-
-  grain: one row per registered company
-
-  primary_key: company_number
-
-  columns:
-    - company_number
-    - company_name
-    - company_status
-    - incorporation_date
-    - company_type
-    - sic_code
-    - registered_address
+```
+Bronze (raw JSON → Delta)  →  Silver (cleaned, conformed)  →  Gold (star schema, scored)
 ```
 
-### Purpose
-
-Stores official company registry information and governance-related attributes.
+- **Bronze** preserves raw API responses with lineage columns (`source_file`, ingestion timestamp).
+- **Silver** flattens nested JSON, types columns, deduplicates on business keys, and resolves company identity.
+- **Gold** aggregates Silver to one row per company and computes risk scores.
 
 ---
 
-## stock_market_data
+## Bronze Layer
 
-```yaml
-stock_market_data:
+Raw responses landed in Unity Catalog Volumes and read into Delta with `recursiveFileLookup`. Lineage columns (`source_file`, `ingestion_ts` / `last_update_ts`) are added; no business transformation is applied.
 
-  grain: one row per company per trading day
-
-  primary_key:
-    - ticker_symbol
-    - trading_date
-
-  columns:
-    - ticker_symbol
-    - trading_date
-    - open_price
-    - close_price
-    - high_price
-    - low_price
-    - trading_volume
-    - market_cap
-```
-
-### Purpose
-
-Captures daily stock performance and market indicators.
+| Table | Source | Notes |
+| --- | --- | --- |
+| `bronze.ch_overview` | Companies House | nested structs for accounts, address, confirmation statement |
+| `bronze.ch_people` | Companies House | `items` array of officer structs |
+| `bronze.ch_filing_history` | Companies House | `items` array of filing structs; `total_count` per company |
+| `bronze.yf_stock` | Yahoo Finance | daily OHLCV; ticker held in file path |
+| `bronze.yf_info` | Yahoo Finance | wide company info payload |
+| `bronze.yf_income_statement` | Yahoo Finance | wide: metrics in rows, periods as columns |
+| `bronze.yf_balance_sheet` | Yahoo Finance | wide |
+| `bronze.yf_cashflow` | Yahoo Finance | wide |
+| `bronze.yf_news` | Yahoo Finance News | nested `content` struct |
 
 ---
 
-## financial_news
+## Silver Layer
 
+Cleaned and conformed. Every table is joinable to a company via either `company_number` (Companies House) or a ticker (`ticker` / `ticker_safe`, Yahoo Finance), bridged by `dim_company`.
+
+### silver.dim_company *(entity-resolution bridge)*
 ```yaml
-financial_news:
-
-  grain: one row per news article
-
-  primary_key: article_id
-
-  columns:
-    - article_id
-    - company_name
-    - publication_date
-    - headline
-    - source
-    - article_url
-    - sentiment_score
+grain: one row per company
+primary_key: company_id        # = company_number (canonical)
+columns:
+  - company_id
+  - company_name
+  - company_number             # Companies House key
+  - ticker                     # real ticker, e.g. SBRY.L  (joins yf_info)
+  - ticker_safe                # path-safe ticker, e.g. SBRY_L (joins yf_stock/financials/news)
 ```
 
-### Purpose
-
-Captures external events and sentiment signals impacting companies.
-
----
-
-# Business Definitions
-
+### silver.ch_overview
 ```yaml
-business_definitions:
+grain: one row per company
+primary_key: company_number
+columns: [company_number, company_name, company_status, company_type, jurisdiction,
+          date_of_creation, accounts_overdue, confirmation_overdue,
+          has_been_liquidated, has_charges, has_insolvency_history, sic_codes, ...]
+```
 
-  company:
-    A legally registered business entity.
+### silver.ch_people
+```yaml
+grain: one row per officer appointment
+primary_key: [company_number, officer_name, officer_role, appointed_on]
+columns: [company_number, officer_name, officer_role, appointed_on, resigned_on,
+          nationality, country_of_residence, is_active, ingestion_ts]
+```
 
-  stock_performance:
-    Financial market activity associated with a company.
+### silver.ch_filing_history
+```yaml
+grain: one row per filing
+primary_key: [company_number, transaction_id]
+columns: [company_number, total_filings_lifetime, transaction_id, filing_date,
+          category, filing_type, description, subcategory, paper_filed, ingestion_ts]
+```
 
-  news_event:
-    External event or article that may influence company performance.
+### silver.yf_info
+```yaml
+grain: one row per company
+primary_key: ticker            # real ticker
+columns: [ticker, company_name, sector, industry, country, marketcap, beta,
+          overallrisk, auditrisk, boardrisk, ...]
+```
 
-  governance_risk:
-    Risk derived from registry-related attributes.
+### silver.yf_stock
+```yaml
+grain: one row per company per trading day
+primary_key: [ticker, trading_date]   # NOTE: 'ticker' here holds the SAFE form
+columns: [ticker, trading_date, open, high, low, close, volume, dividends,
+          stock_splits, ingestion_ts]
+```
 
-  market_risk:
-    Risk derived from market behavior and stock volatility.
+### silver.yf_financials
+```yaml
+grain: one row per company per statement per metric per period (long format)
+primary_key: [ticker_safe, statement_type, metric_name, period_end_date]
+columns: [ticker_safe, statement_type, metric_name, period_end_date,
+          metric_value, ingestion_ts]
+statement_type: [income_statement, balance_sheet, cashflow]
+```
 
-  sentiment_risk:
-    Risk derived from negative news sentiment.
-
-  overall_risk_score:
-    Combined risk score derived from governance, market,
-    and sentiment indicators.
+### silver.yf_news
+```yaml
+grain: one row per news article
+primary_key: news_id
+columns: [news_id, ticker_safe, title, summary, provider_name, pub_date,
+          canonical_url, ingestion_ts]
 ```
 
 ---
 
-# Target (Gold Layer Design)
+## Gold Layer (Star Schema)
+
+A single star: one dimension and one fact at **company grain**.
+
+```
+   dim_company  1 ───< (1:1)  fact_company_risk
+```
+
+### gold.dim_company
+```yaml
+grain: one row per company
+primary_key: company_id
+columns:
+  - company_id
+  - company_name
+  - company_number
+  - ticker
+  - ticker_safe
+  - sector
+  - industry
+```
+
+### gold.fact_company_risk
+```yaml
+grain: one row per company
+primary_key: company_id
+foreign_key: company_id -> gold.dim_company
+
+measures:
+  financial_pillar:   [debt_to_equity, current_ratio, net_margin, revenue_growth, financial_score]
+  market_pillar:      [annual_volatility, max_drawdown, beta, market_score]
+  governance_pillar:  [company_age_years, board_size, director_churn, accounts_overdue, governance_score]
+  news_pillar:        [news_volume, news_sentiment, news_score]
+  composite:          [risk_score, risk_band, score_date]
+```
+
+> **Design note:** This model extends the original three-pillar design (governance, market, sentiment) by adding a **financial** pillar, since `yf_financials` provides rich, well-populated fundamentals. Each pillar score is normalized 0–100 across the company universe; higher = higher risk.
+
+---
+
+## Entity Resolution
+
+Companies House and Yahoo Finance use different identifiers. Resolution is performed in Silver via `dim_company`, which holds all identifiers for each company:
+
+```
+company_number  ──┐
+ticker (real)   ──┤──>  dim_company.company_id  (canonical)
+ticker_safe     ──┘
+```
+
+- Companies House tables join on `company_number`.
+- `yf_info` joins on `ticker`.
+- `yf_stock`, `yf_financials`, `yf_news` join on `ticker_safe`.
+
+Mapping is a curated seed (20 companies) carrying name, number, real ticker, and safe ticker — chosen over fuzzy name matching for correctness at this scale.
+
+---
+
+## Business Definitions
 
 ```yaml
-gold_layer:
-
-  schema: gold
-
-  tables:
-    - dim_company
-    - dim_date
-    - dim_news_event
-    - fact_stock_performance
-    - fact_company_risk
+company:            A legally registered business entity.
+financial_risk:     Risk from leverage, liquidity, profitability, and growth.
+market_risk:        Risk from price volatility, drawdown, and beta.
+governance_risk:    Risk from company status, age, director churn, and filing compliance.
+news_risk:          Risk from news volume and sentiment.
+risk_score:         Weighted 0–100 composite of the four pillars.
+risk_band:          Categorical label (High / Medium / Low) derived from risk_score.
 ```
 
 ---
 
-## Star Schema Design
+## Data Quality Rules
 
-### Dimension Tables
-
-```yaml
-dim_company:
-  company master data
-
-dim_date:
-  calendar attributes
-
-dim_news_event:
-  news and sentiment attributes
-```
-
-### Fact Tables
-
-```yaml
-fact_stock_performance:
-  daily stock market activity
-
-fact_company_risk:
-  consolidated risk indicators and scores
-```
+| Rule | Applies to |
+| --- | --- |
+| `company_number` not null | ch_* tables, dim_company |
+| `ticker` / `ticker_safe` not null | yf_* tables |
+| `trading_date` not null | yf_stock |
+| `metric_value` not null and not NaN | yf_financials |
+| `close >= 0`, `volume >= 0` | yf_stock |
+| Deduplicate on declared business key | all Silver tables |
+| `company_id` exists in `dim_company` | fact_company_risk |
+| `0 <= risk_score <= 100` | fact_company_risk |
+| `risk_band ∈ {High, Medium, Low}` | fact_company_risk |
 
 ---
 
-# Data Access & Security
+## Data Classification & Security
 
-## Access Control
-
-```yaml
-access_control:
-
-  groups:
-
-    - ad_group_risk_analysts:
-        read access
-
-    - ad_group_data_engineers:
-        full access
-
-    - ad_group_management:
-        read access
-
-    - ad_group_governance_team:
-        registry and governance access
-```
-
----
-
-## Security Controls
+| Data element | Classification |
+| --- | --- |
+| Company name / number | Internal |
+| Registered address | Sensitive |
+| Stock metrics | Confidential |
+| Risk scores | Confidential |
+| News sentiment | Internal |
 
 ```yaml
 security:
-
-  row_level_security:
-    optional
-
-  column_level_security:
-    - mask registered_address
-
-  encryption:
-    at_rest: enabled
-    in_transit: TLS/HTTPS
+  encryption: { at_rest: enabled, in_transit: TLS/HTTPS }
+  access_control:
+    data_engineers: full
+    risk_analysts: read
+    governance_team: registry/governance read
+  secrets:
+    companies_house_api_key: stored in Databricks secret scope (not in source)
 ```
+
+> **Security note:** API credentials must be stored in a Databricks secret scope and read via `dbutils.secrets.get(...)`, never hardcoded in notebooks.
 
 ---
 
-# Confidentiality Classification
+## Data Refresh & Latency
 
 ```yaml
-data_classification:
-
-  company_name: internal
-
-  registered_address: sensitive
-
-  stock_market_data: confidential
-
-  risk_scores: confidential
-
-  sentiment_data: internal
+frequency: daily (batch)
+ingestion_time: 01:00 UTC
+availability_sla: 03:00 UTC
+latency: T+1
 ```
-
-### Classification Rules
-
-| Data Element       | Classification |
-| ------------------ | -------------- |
-| Company Name       | Internal       |
-| Registered Address | Sensitive      |
-| Stock Metrics      | Confidential   |
-| Risk Scores        | Confidential   |
-| News Sentiment     | Internal       |
 
 ---
 
-# Data Refresh & Latency
+## Lineage
+
+```
+Companies House  -> bronze.ch_*        -> silver.ch_*        -┐
+Yahoo Finance    -> bronze.yf_stock    -> silver.yf_stock    -┤
+                 -> bronze.yf_info      -> silver.yf_info      ├─> dim_company (entity resolution)
+                 -> bronze.yf_*_stmt    -> silver.yf_financials┤        │
+Yahoo News       -> bronze.yf_news     -> silver.yf_news      -┘        │
+                                                                        v
+                          aggregate per pillar + normalize + weight  -> gold.fact_company_risk
+                          yf_info sector/industry + dim_company       -> gold.dim_company
+```
+
+---
+
+## Orchestration
 
 ```yaml
-data_refresh:
-
-  frequency: daily
-
-  ingestion_time: 01:00 UTC
-
-  availability_sla: 03:00 UTC
-
-  latency: T+1
+tool: Databricks Workflows / Notebooks
+pipeline_order:
+  - ingest_companies_house
+  - ingest_yahoo_finance
+  - ingest_yahoo_news
+  - bronze_tables
+  - silver_dim_company            # entity resolution
+  - silver_ch_overview
+  - silver_ch_people
+  - silver_ch_filing_history
+  - silver_yf_info
+  - silver_yf_stock
+  - silver_yf_financials
+  - silver_yf_news
+  - gold_dim_company
+  - gold_fact_company_risk        # risk scoring engine
 ```
-
-### SLA
-
-| Metric            | Value     |
-| ----------------- | --------- |
-| Refresh Frequency | Daily     |
-| Ingestion Time    | 01:00 UTC |
-| Data Available    | 03:00 UTC |
-| Processing Type   | Batch     |
 
 ---
 
-# Data Quality Rules
+## Consumption Layer
 
 ```yaml
-data_quality:
-
-  rules:
-
-    - company_number must not be null
-
-    - company_name must not be null
-
-    - ticker_symbol must not be null
-
-    - trading_date must not be null
-
-    - close_price >= 0
-
-    - trading_volume >= 0
-
-    - sentiment_score between -1 and 1
-
-    - company_id must exist in dim_company
-
-    - date_key must exist in dim_date
-
-    - overall_risk_score between 0 and 100
-```
-
-### Quality Expectations
-
-| Rule            | Validation |
-| --------------- | ---------- |
-| Company Number  | Not Null   |
-| Company Name    | Not Null   |
-| Trading Date    | Not Null   |
-| Closing Price   | ≥ 0        |
-| Trading Volume  | ≥ 0        |
-| Sentiment Score | -1 to 1    |
-| Risk Score      | 0 to 100   |
-
----
-
-# Data Dictionary
-
-## dim_company
-
-```yaml
-dim_company:
-
-  company_id:
-    surrogate key
-
-  company_number:
-    Companies House identifier
-
-  company_name:
-    official company name
-
-  company_status:
-    company status
-
-  incorporation_date:
-    registration date
-
-  company_type:
-    legal entity type
-
-  sic_code:
-    industry classification
-```
-
----
-
-## dim_date
-
-```yaml
-dim_date:
-
-  date_key:
-    YYYYMMDD
-
-  full_date:
-    calendar date
-
-  day_num:
-    day number
-
-  month_num:
-    month number
-
-  quarter_num:
-    quarter number
-
-  year_num:
-    year number
-```
-
----
-
-## dim_news_event
-
-```yaml
-dim_news_event:
-
-  news_id:
-    unique identifier
-
-  headline:
-    article title
-
-  source:
-    publisher
-
-  publication_date:
-    publication timestamp
-
-  sentiment_score:
-    sentiment value
-```
-
----
-
-## fact_stock_performance
-
-```yaml
-fact_stock_performance:
-
-  company_id:
-    FK to dim_company
-
-  date_key:
-    FK to dim_date
-
-  ticker_symbol:
-    stock ticker
-
-  open_price:
-    opening price
-
-  close_price:
-    closing price
-
-  market_cap:
-    market capitalization
-
-  trading_volume:
-    volume traded
-```
-
----
-
-## fact_company_risk
-
-```yaml
-fact_company_risk:
-
-  company_id:
-    FK to dim_company
-
-  date_key:
-    FK to dim_date
-
-  governance_risk_score:
-    governance indicator
-
-  market_risk_score:
-    market indicator
-
-  sentiment_risk_score:
-    sentiment indicator
-
-  overall_risk_score:
-    final calculated score
-```
-
----
-
-# Lineage
-
-```yaml
-lineage:
-
-  company_registry
-      -> bronze
-      -> silver
-      -> dim_company
-
-  stock_market_data
-      -> bronze
-      -> silver
-      -> fact_stock_performance
-
-  financial_news
-      -> bronze
-      -> silver
-      -> dim_news_event
-
-  company_registry + stock_market_data + financial_news
-      -> silver
-      -> entity_resolution
-      -> risk_scoring_engine
-      -> fact_company_risk
-
-  trading_date
-      -> dim_date
-```
-
----
-
-# Orchestration Details
-
-```yaml
-orchestration:
-
-  tool: Databricks Workflows
-
-  pipelines:
-
-    - ingest_company_registry
-
-    - ingest_stock_market_data
-
-    - ingest_financial_news
-
-    - transform_bronze_to_silver
-
-    - perform_entity_resolution
-
-    - load_dim_company
-
-    - load_dim_date
-
-    - load_dim_news_event
-
-    - load_fact_stock_performance
-
-    - calculate_risk_scores
-
-    - load_fact_company_risk
-```
-
----
-
-# Consumption Layer
-
-```yaml
-consumption_layer:
-
-  users:
-    - Risk Analysts
-    - Financial Analysts
-    - Governance Teams
-    - Executive Leadership
-
-  use_cases:
-    - Company Risk Assessment
-    - Financial Performance Monitoring
-    - Governance Monitoring
-    - News Impact Analysis
-    - Cross Company Benchmarking
-    - Investment Risk Evaluation
-
-  outputs:
-    - Company Intelligence Dataset
-    - Risk Analytics Reports
-    - Governance Reports
-    - Stock Performance Reports
-    - News Sentiment Reports
-```
-
----
-
-# End-to-End Data Flow
-
-```text
-Companies House API
-            |
-            v
-      Bronze Layer
-            |
-            v
-      Silver Layer
-   (Cleaning & Standardization)
-            |
-            +-------------------+
-            |                   |
-            v                   v
-
-Yahoo Finance API      Yahoo Finance News
-            |                   |
-            +---------+---------+
-                      |
-                      v
-
-             Entity Resolution
-                      |
-                      v
-
-             Risk Scoring Engine
-                      |
-                      v
-
-                Gold Layer
-      +-----------------------------+
-      | dim_company                 |
-      | dim_date                    |
-      | dim_news_event              |
-      | fact_stock_performance      |
-      | fact_company_risk           |
-      +-----------------------------+
-                      |
-                      v
-
-            Analytics & Reporting
+users: [Risk Analysts, Financial Analysts, Governance Teams, Executive Leadership]
+use_cases:
+  - Company risk assessment
+  - Cross-company benchmarking
+  - Governance monitoring
+  - Financial performance review
+outputs:
+  - Company intelligence dataset (gold.dim_company + gold.fact_company_risk)
+  - Risk ranking and pillar breakdown
 ```
