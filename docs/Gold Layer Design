@@ -1,0 +1,187 @@
+# Gold Layer Design
+## Company Risk Intelligence Platform
+
+> **Model:** Star schema · 4 dimensions + 1 fact · grain = one row per company
+
+---
+
+## 1. Problem in the Silver Layer
+
+The Silver layer has mixed granularity and split identifiers:
+
+- `yf_stock` — one row per company per day
+- `yf_financials` — one row per metric per statement per period
+- `ch_people` — one row per officer appointment
+- `ch_filing_history` — one row per filing
+- `ch_overview`, `yf_info` — one row per company
+- Companies House tables key on `company_number`; Yahoo tables key on `ticker` / `ticker_safe`
+
+There is no fact/dimension separation and nothing is a scored, analytics-ready company view.
+
+**The Gold layer fixes this** by collapsing every grain to one row per company, unifying identity to a single `company_id`, and separating descriptive dimensions from measured facts.
+
+---
+
+## 2. Star Schema
+
+Build **1 core fact table + 4 dimension tables**. Each Silver table is aggregated to company grain, then assembled into the star.
+
+```mermaid
+erDiagram
+    DIM_COMPANY  ||--|| FACT_COMPANY_RISK : describes
+    DIM_INDUSTRY ||--o{ FACT_COMPANY_RISK : classifies
+    DIM_DATE     ||--o{ FACT_COMPANY_RISK : "scored on"
+    DIM_OFFICER  ||--|| FACT_COMPANY_RISK : governs
+```
+
+---
+
+## 3. Fact Table — `fact_company_risk`
+
+**Granularity: 1 row = 1 company** (the risk assessment).
+
+```
+company_id          (PK, FK -> dim_company)
+score_date_key      (FK -> dim_date)
+industry_id         (FK -> dim_industry)
+officer_summary_id  (FK -> dim_officer)
+
+-- Financial pillar (from yf_financials)
+debt_to_equity
+current_ratio
+net_margin
+revenue_growth
+financial_score
+
+-- Market pillar (from yf_stock, yf_info)
+annual_volatility
+max_drawdown
+beta
+market_score
+
+-- Governance pillar (from ch_overview, ch_people, ch_filing_history)
+company_age_years
+accounts_overdue
+governance_score
+
+-- News pillar (from yf_news)
+news_volume
+news_sentiment
+news_score
+
+-- Composite
+risk_score
+risk_band
+score_date
+```
+
+**Derived measures**
+
+```
+financial_score   = normalized blend of leverage, liquidity, margin, growth   (0-100)
+market_score      = normalized blend of volatility, drawdown, beta            (0-100)
+governance_score  = normalized blend of age, churn, compliance flags          (0-100)
+news_score        = normalized blend of volume, sentiment                     (0-100)
+
+risk_score = 0.35*financial_score + 0.30*market_score
+           + 0.25*governance_score + 0.10*news_score
+
+risk_band  = High   if risk_score >= 66
+             Medium if risk_score >= 33
+             Low    otherwise
+```
+
+Each pillar is min-max normalized across the company universe so the score is relative to peers; higher = higher risk.
+
+---
+
+## 4. Dimension — `dim_company`
+
+Master "who." One row per company. Source: `silver.dim_company` + `silver.ch_overview` + `silver.yf_info`.
+
+```
+company_id (PK)        -- canonical (= company_number)
+company_name
+company_number
+ticker
+ticker_safe
+company_status         -- from ch_overview
+company_type           -- from ch_overview
+date_of_creation       -- from ch_overview
+```
+
+---
+
+## 5. Dimension — `dim_date`
+
+Standard calendar dimension. One row per calendar day. Generated from the date range in `silver.yf_stock`.
+
+```
+date_key (PK)          -- YYYYMMDD, e.g. 20250604
+full_date
+day
+month
+quarter
+year
+day_of_week
+```
+
+---
+
+## 6. Dimension — `dim_industry`
+
+Classification axis for grouping/comparison. Derived from distinct `sector` / `industry` in `silver.yf_info`.
+
+```
+industry_id (PK)       -- generated surrogate key
+sector_name
+industry_name
+```
+
+---
+
+## 7. Dimension — `dim_officer`
+
+Company-level governance summary (company grain, fits the single fact). Derived by aggregating `silver.ch_people`.
+
+```
+officer_summary_id (PK)   -- = company_id (one summary row per company)
+company_id
+board_size                -- count of officers
+active_officers           -- is_active = true
+resigned_officers         -- is_active = false
+director_churn (derived)  -- resigned_officers / board_size
+```
+
+---
+
+## 8. Relationship Diagram (Mental Model)
+
+```
+dim_company   dim_industry   dim_date
+      \            |            /
+       \           |           /
+        ---- fact_company_risk ----
+                   |
+              dim_officer
+```
+
+`fact_company_risk` is the central scoring fact — the company-risk equivalent of a customer-score fact — sitting at the centre because scoring is the purpose of the platform.
+
+---
+
+## 9. What to REMOVE from Gold
+
+Do **not** carry forward:
+
+- **Detail-grain rows** — daily stock, per-metric financials, per-officer, per-filing rows are aggregated to one value per company; raw detail stays in Silver.
+- **Split/duplicate identifiers** — resolve `ticker` / `ticker_safe` to `company_id` once in `dim_company`; the fact uses keys only.
+- **Repeated descriptive text** — company name lives in `dim_company`, sector/industry in `dim_industry`; the fact carries keys, not repeated strings.
+- **Wide denormalized financial columns** — pull specific metrics from long-format `yf_financials`; do not rebuild wide statements.
+- **News at article grain** — collapse to `news_volume` + `news_sentiment`; article detail stays in Silver (no news dimension in this single-fact star).
+
+---
+
+## 10. Note on Scope
+
+This is a clean 4-dimension + 1-fact star at company grain. News is article-grain and is therefore represented as measures, not a dimension. If a news dimension is required, the model extends to a 2-fact constellation (`fact_company_risk` + `fact_news` sharing `dim_company` and `dim_date`) — see the architecture document's future enhancements.
