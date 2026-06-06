@@ -86,9 +86,8 @@ See `architecture.md` for full system design.
 
 ## Tech Stack
 
-- Python
+- Python / PySpark
 - Databricks / Delta Lake
-- Pandas
 - yfinance API
 - Companies House API
 
